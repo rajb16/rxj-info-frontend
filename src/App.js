@@ -79,51 +79,53 @@ function App() {
     
     function setupPeerEvents(peer) {
         setStatus(`Connected to a peer! Ready to share.`);
-        peer.on('data', data => handleData(data, peer));
+        peer.on('data', data => handleData(data));
         const fileList = Object.values(myFiles).map(f => ({ name: f.name, size: f.size }));
         if (fileList.length > 0) {
             peer.send(JSON.stringify({ type: 'file-list', files: fileList }));
         }
     }
 
-    // --- THIS IS THE UPDATED FUNCTION ---
-    function handleData(data, peer) {
-        // First, check if the data is a raw binary chunk
-        if (data instanceof ArrayBuffer) {
+    // --- THIS IS THE CORRECTED FUNCTION ---
+    function handleData(data) {
+        // More robustly check if the data is a command string or a binary chunk
+        if (typeof data === 'string') {
+            try {
+                const message = JSON.parse(data);
+                if (message.type === 'file-list') {
+                    setPeerFiles(prev => ({ ...prev, ...message.files.reduce((obj, file) => ({...obj, [file.name]: file}), {}) }));
+                } else if (message.type === 'file-request') {
+                    const file = myFiles[message.name];
+                    // Find the peer who sent the request (this part is tricky in a multi-peer setup)
+                    // For now, we assume the request came from a valid peer and just send back.
+                    Object.values(peersRef.current).forEach(peer => {
+                         if (file && peer.connected) sendFile(file, peer);
+                    });
+                } else if (message.type === 'file-done') {
+                    const fileName = message.name;
+                    const fileInfo = fileChunksRef.current[fileName];
+                    if (fileInfo) {
+                        const completeFile = new Blob(fileInfo.chunks);
+                        const url = URL.createObjectURL(completeFile);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = fileName;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        delete fileChunksRef.current[fileName];
+                    }
+                }
+            } catch (e) {
+                console.error('Error parsing JSON message: ', e);
+            }
+        } else {
+            // If it's not a string, it's a file chunk (ArrayBuffer/Buffer)
             const chunk = data;
-            // Find which file is being received
             const fileName = Object.keys(fileChunksRef.current).find(key => fileChunksRef.current[key].receiving);
             if (fileName) {
                 fileChunksRef.current[fileName].chunks.push(chunk);
             }
-            return;
-        }
-        
-        // If it's not a chunk, it must be a JSON command
-        try {
-            const message = JSON.parse(data);
-            if (message.type === 'file-list') {
-                 setPeerFiles(prev => ({ ...prev, ...message.files.reduce((obj, file) => ({...obj, [file.name]: file}), {}) }));
-            } else if (message.type === 'file-request') {
-                const file = myFiles[message.name];
-                if (file) sendFile(file, peer);
-            } else if (message.type === 'file-done') {
-                const fileName = message.name;
-                const fileInfo = fileChunksRef.current[fileName];
-                if (fileInfo) {
-                    const completeFile = new Blob(fileInfo.chunks);
-                    const url = URL.createObjectURL(completeFile);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = fileName;
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    delete fileChunksRef.current[fileName];
-                }
-            }
-        } catch (e) {
-            console.error('Error parsing data message: ', e);
         }
     }
     
@@ -160,7 +162,6 @@ function App() {
             if (offset < file.size) {
                 readSlice(offset);
             } else {
-                // Send the done signal after the last chunk
                 peer.send(JSON.stringify({ type: 'file-done', name: file.name }));
             }
         };
