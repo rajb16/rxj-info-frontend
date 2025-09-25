@@ -19,6 +19,7 @@ function App() {
         setStatus('Successfully connected to the signaling server!');
 
         socketRef.current.on("all users", users => {
+            console.log("LOG: Network has existing users:", users);
             setStatus("Network active. Connecting to peers...");
             users.forEach(userID => {
                 const peer = createPeer(userID, socketRef.current.id);
@@ -28,6 +29,7 @@ function App() {
         });
 
         socketRef.current.on("signal received", payload => {
+            console.log("LOG: Received an offer signal from:", payload.callerID);
             setStatus("Peer joining. Accepting connection...");
             const peer = addPeer(payload.signal, payload.callerID);
             peersRef.current[payload.callerID] = peer;
@@ -35,17 +37,19 @@ function App() {
         });
 
         socketRef.current.on("signal returned", payload => {
+            console.log("LOG: Received an answer signal from:", payload.id);
             peersRef.current[payload.id]?.signal(payload.signal);
         });
 
         socketRef.current.on("user left", userID => {
+            console.log("LOG: A peer has left:", userID);
             setStatus("A peer has left the network.");
             if (peersRef.current[userID]) peersRef.current[userID].destroy();
             const newPeers = { ...peersRef.current };
             delete newPeers[userID];
             peersRef.current = newPeers;
             setPeers(newPeers);
-            setPeerFiles({}); // Clear files from the peer that left
+            setPeerFiles({});
         });
         
         return () => {
@@ -64,6 +68,7 @@ function App() {
     };
     
     function createPeer(userToSignal, callerID) {
+        console.log("LOG: Creating peer to connect to:", userToSignal);
         const peer = new Peer({ initiator: true, trickle: false, ...peerConfig });
         peer.on('signal', signal => socketRef.current.emit('sending signal', { userToSignal, callerID, signal }));
         peer.on('connect', () => setupPeerEvents(peer));
@@ -71,6 +76,7 @@ function App() {
     }
 
     function addPeer(incomingSignal, callerID) {
+        console.log("LOG: Adding peer who signaled us:", callerID);
         const peer = new Peer({ initiator: false, trickle: false, ...peerConfig });
         peer.on('signal', signal => socketRef.current.emit('returning signal', { signal, callerID }));
         peer.on('connect', () => setupPeerEvents(peer));
@@ -79,77 +85,66 @@ function App() {
     }
     
     function setupPeerEvents(peer) {
+        console.log("LOG: CONNECT event fired! Peer connection established.");
         setStatus(`Connected to a peer! Ready to share.`);
-        // Pass the specific peer to the data handler
         peer.on('data', data => handleData(data, peer));
         const fileList = Object.values(myFiles).map(f => ({ name: f.name, size: f.size }));
         if (fileList.length > 0) {
+            console.log("LOG: Announcing my existing files to new peer.");
             peer.send(JSON.stringify({ type: 'file-list', files: fileList }));
         }
     }
 
     function handleData(data, requestingPeer) {
+        console.log("LOG: Received data from a peer.");
         if (typeof data === 'string') {
             try {
                 const message = JSON.parse(data);
                 if (message.type === 'file-list') {
-                    console.log("LOG: Received file list from a peer.");
+                    console.log("LOG: It's a file list.");
                     setPeerFiles(prev => ({ ...prev, ...message.files.reduce((obj, file) => ({...obj, [file.name]: file}), {}) }));
                 } else if (message.type === 'file-request') {
-                    console.log(`LOG: Received request for file: ${message.name}`);
+                    console.log(`LOG: It's a request for file: ${message.name}`);
                     const file = myFiles[message.name];
                     if (file) {
-                        console.log("LOG: File found. Preparing to send.");
-                        sendFile(file, requestingPeer); // Send back to the peer that requested it
-                    } else {
-                        console.log("LOG: File not found in my list.");
+                        sendFile(file, requestingPeer);
                     }
                 } else if (message.type === 'file-done') {
-                    console.log(`LOG: File transfer complete for: ${message.name}`);
+                    console.log(`LOG: It's a file-done signal for: ${message.name}`);
                     const fileName = message.name;
                     const fileInfo = fileChunksRef.current[fileName];
                     if (fileInfo) {
                         const completeFile = new Blob(fileInfo.chunks);
                         const url = URL.createObjectURL(completeFile);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = fileName;
-                        document.body.appendChild(a);
-                        a.click();
-                        a.remove();
+                        const a = document.createElement('a'); a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); a.remove();
                         console.log("LOG: Download link created.");
                         delete fileChunksRef.current[fileName];
                     }
                 }
-            } catch (e) {
-                console.error('Error parsing JSON message: ', e);
-            }
+            } catch (e) { console.error('Error parsing JSON message: ', e); }
         } else {
-            const chunk = data;
             const fileName = Object.keys(fileChunksRef.current).find(key => fileChunksRef.current[key].receiving);
             if (fileName) {
-                console.log(`LOG: Received a file chunk for: ${fileName}`);
-                fileChunksRef.current[fileName].chunks.push(chunk);
+                console.log(`LOG: It's a file chunk for: ${fileName}`);
+                fileChunksRef.current[fileName].chunks.push(data);
             }
         }
     }
     
     function handleFileSelect(e) {
-        const file = e.target.files[0];
-        if (!file) return;
-        const fileInfo = { name: file.name, size: file.size };
+        const file = e.target.files[0]; if (!file) return;
         setMyFiles(prev => ({ ...prev, [file.name]: file }));
         console.log("LOG: Announcing new file to all peers:", file.name);
         Object.values(peersRef.current).forEach(peer => {
             if (peer.connected) {
-                 peer.send(JSON.stringify({ type: 'file-list', files: [fileInfo] }));
+                 peer.send(JSON.stringify({ type: 'file-list', files: [{ name: file.name, size: file.size }] }));
             }
         });
         e.target.value = '';
     }
     
     function requestFile(fileName) {
-        console.log(`LOG: Requesting to download file: ${fileName}`);
+        console.log(`LOG: [You clicked] Requesting to download file: ${fileName}`);
         fileChunksRef.current[fileName] = { chunks: [], receiving: true };
         Object.values(peersRef.current).forEach(peer => {
             if (peer.connected) {
@@ -159,8 +154,8 @@ function App() {
     }
 
     function sendFile(file, peer) {
-        const chunkSize = 64 * 1024;
-        let offset = 0;
+        console.log(`LOG: Preparing to send ${file.name} in chunks.`);
+        const chunkSize = 64 * 1024; let offset = 0;
         const reader = new FileReader();
         reader.onload = (e) => {
             if (e.target.error) return console.error("Error reading file:", e.target.error);
@@ -172,10 +167,7 @@ function App() {
                 peer.send(JSON.stringify({ type: 'file-done', name: file.name }));
             }
         };
-        const readSlice = o => {
-            const slice = file.slice(o, o + chunkSize);
-            reader.readAsArrayBuffer(slice);
-        };
+        const readSlice = o => { const slice = file.slice(o, o + chunkSize); reader.readAsArrayBuffer(slice); };
         readSlice(0);
     }
     
