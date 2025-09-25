@@ -21,7 +21,7 @@
     "prebuild": "chmod +x ./node_modules/.bin/react-scripts && chmod +x ./node_modules/.bin/react-app-rewired",
     "build": "GENERATE_SOURCEMAP=false react-app-rewired build",
     "test": "react-app-rewired test",
-    "eject": "react-scripts eject"
+    "eject": "react-app-rewired eject"
   },
   "eslintConfig": {
     "extends": [
