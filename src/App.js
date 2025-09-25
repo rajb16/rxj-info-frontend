@@ -117,7 +117,11 @@ function App() {
           ),
         }));
       } else if (message.type === "file-request") {
-        sendFile(myFiles[message.name], peer);
+        const file = myFiles[message.name]; // Look for the file
+        if (file) {
+          // Check if this peer has the file
+          sendFile(file, peer); // Only send if the file exists
+        }
       } else if (message.type === "file-chunk") {
         if (!fileChunksRef.current[message.name])
           fileChunksRef.current[message.name] = [];
