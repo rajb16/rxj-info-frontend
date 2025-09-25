@@ -3,12 +3,9 @@ import io from 'socket.io-client';
 import Peer from 'simple-peer';
 import './App.css';
 
-// (All the code from the previous working version, with the following functions updated)
-
 const API_URL = 'https://rxj-info-api.onrender.com';
 
 function App() {
-    // --- (State and Refs remain the same as the last version) ---
     const [status, setStatus] = useState('Connecting to network...');
     const [peers, setPeers] = useState({});
     const [myFiles, setMyFiles] = useState({});
@@ -21,8 +18,6 @@ function App() {
         socketRef.current = io(API_URL);
         setStatus('Successfully connected to the signaling server!');
 
-        // This client gets a list of users already in the room.
-        // This client will be the INITIATOR for all these connections.
         socketRef.current.on("all users", users => {
             setStatus("Network active. Connecting to peers...");
             users.forEach(userID => {
@@ -32,7 +27,6 @@ function App() {
             });
         });
 
-        // Another user has sent us an OFFER signal. We are the RECEIVER.
         socketRef.current.on("signal received", payload => {
             setStatus("Peer joining. Accepting connection...");
             const peer = addPeer(payload.signal, payload.callerID);
@@ -40,7 +34,6 @@ function App() {
             setPeers(prev => ({...prev, [payload.callerID]: peer}));
         });
 
-        // We, as an INITIATOR, have received an ANSWER signal back.
         socketRef.current.on("signal returned", payload => {
             peersRef.current[payload.id]?.signal(payload.signal);
         });
@@ -60,7 +53,6 @@ function App() {
         };
     }, []);
 
-    // --- (All other functions remain the same, but for safety, here is the full component) ---
     const peerConfig = {
         config: {
             iceServers: [
@@ -94,7 +86,20 @@ function App() {
         }
     }
 
+    // --- THIS IS THE UPDATED FUNCTION ---
     function handleData(data, peer) {
+        // First, check if the data is a raw binary chunk
+        if (data instanceof ArrayBuffer) {
+            const chunk = data;
+            // Find which file is being received
+            const fileName = Object.keys(fileChunksRef.current).find(key => fileChunksRef.current[key].receiving);
+            if (fileName) {
+                fileChunksRef.current[fileName].chunks.push(chunk);
+            }
+            return;
+        }
+        
+        // If it's not a chunk, it must be a JSON command
         try {
             const message = JSON.parse(data);
             if (message.type === 'file-list') {
@@ -118,11 +123,7 @@ function App() {
                 }
             }
         } catch (e) {
-            const chunk = data;
-            const fileName = Object.keys(fileChunksRef.current).find(key => fileChunksRef.current[key].receiving);
-            if (fileName) {
-                fileChunksRef.current[fileName].chunks.push(chunk);
-            }
+            console.error('Error parsing data message: ', e);
         }
     }
     
@@ -154,11 +155,12 @@ function App() {
         const reader = new FileReader();
         reader.onload = (e) => {
             if (e.target.error) return console.error("Error reading file:", e.target.error);
-            peer.send(e.target.result);
+            peer.send(e.target.result); // Send the raw ArrayBuffer
             offset += e.target.result.byteLength;
             if (offset < file.size) {
                 readSlice(offset);
             } else {
+                // Send the done signal after the last chunk
                 peer.send(JSON.stringify({ type: 'file-done', name: file.name }));
             }
         };
