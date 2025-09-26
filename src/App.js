@@ -16,6 +16,19 @@ function App() {
     const myFilesRef = useRef(myFiles);
     myFilesRef.current = myFiles;
 
+    const cleanupPeer = useCallback((peerID) => {
+        console.log(`LOG: Cleaning up resources for peer ${peerID}`);
+        if (peersRef.current[peerID]) {
+            peersRef.current[peerID].destroy();
+            delete peersRef.current[peerID];
+        }
+        setPeerFiles(prev => {
+            const newPeerFiles = { ...prev };
+            delete newPeerFiles[peerID];
+            return newPeerFiles;
+        });
+    }, []);
+
     const handleData = useCallback((data, peerID) => {
         if (typeof data === 'string') {
             try {
@@ -42,109 +55,101 @@ function App() {
             if (fileName) fileChunksRef.current[fileName].chunks.push(data);
         }
     }, []);
-    
-    // ================== FIX #1: ROBUST CLEANUP ==================
-    const cleanupPeer = useCallback((peerID) => {
-        console.log(`LOG: Cleaning up resources for peer ${peerID}`);
-        const peer = peersRef.current[peerID];
-        if (peer) {
-            peer.destroy();
-            delete peersRef.current[peerID];
-        }
-        setPeerFiles(prev => {
-            const newPeerFiles = { ...prev };
-            delete newPeerFiles[peerID];
-            return newPeerFiles;
-        });
-    }, []);
 
     const setupPeerEvents = useCallback((peer, peerID) => {
-        console.log(`LOG: Setting up events for peer ${peerID}`);
-        
         peer.on('connect', () => {
-            console.log(`LOG: Connection to peer ${peerID} established!`);
             setStatus(`Connected to a peer! Ready to share.`);
             const fileList = Object.values(myFilesRef.current).map(f => ({ name: f.name, size: f.size }));
-            if (fileList.length > 0) {
-                console.log(`LOG: Announcing my files to the newly connected peer ${peerID}`);
-                peer.send(JSON.stringify({ type: 'file-list', files: fileList }));
-            }
+            peer.send(JSON.stringify({ type: 'file-list', files: fileList }));
         });
-
-        peer.on('data', data => handleData(data, peerID));
-        peer.on('error', err => {
-            console.error(`ERROR: Peer ${peerID} error:`, err);
-            cleanupPeer(peerID); // Clean up on error
+        peer.on('data', (data) => handleData(data, peerID));
+        peer.on('error', (err) => {
+            console.error(`ERROR in peer ${peerID}:`, err);
+            cleanupPeer(peerID);
         });
         peer.on('close', () => {
-            console.log(`LOG: Peer ${peerID} connection closed.`);
-            cleanupPeer(peerID); // Clean up on close
+            console.log(`Peer ${peerID} connection closed.`);
+            cleanupPeer(peerID);
         });
     }, [handleData, cleanupPeer]);
 
+
     useEffect(() => {
-        // ================== FIX #2: PREVENT RACE CONDITION ==================
+        socketRef.current = io(API_URL);
+        const socket = socketRef.current;
+
         const createPeer = (userToSignal, callerID) => {
-            if (peersRef.current[userToSignal]) {
-                console.log(`LOG: A peer connection with ${userToSignal} already exists or is being established. Aborting creation.`);
-                return;
-            }
-            console.log(`LOG: Creating peer to connect to: ${userToSignal}`);
             const peer = new Peer({ initiator: true, trickle: false });
-            peersRef.current[userToSignal] = peer; // Store peer immediately
-            peer.on('signal', signal => socketRef.current.emit('sending signal', { userToSignal, callerID, signal }));
+            peer.on('signal', signal => {
+                socket.emit('sending signal', { userToSignal, callerID, signal });
+            });
             setupPeerEvents(peer, userToSignal);
             return peer;
-        };
+        }
+
         const addPeer = (incomingSignal, callerID) => {
-            if (peersRef.current[callerID]) {
-                console.log(`LOG: Peer connection with ${callerID} already exists. Signaling existing peer.`);
-                return peersRef.current[callerID].signal(incomingSignal);
-            }
-            console.log(`LOG: Adding peer who signaled us: ${callerID}`);
             const peer = new Peer({ initiator: false, trickle: false });
-            peersRef.current[callerID] = peer; // Store peer immediately
-            peer.on('signal', signal => socketRef.current.emit('returning signal', { signal, callerID }));
+            peer.on('signal', signal => {
+                socket.emit('returning signal', { signal, callerID });
+            });
             peer.signal(incomingSignal);
             setupPeerEvents(peer, callerID);
             return peer;
-        };
-        socketRef.current = io(API_URL);
-        socketRef.current.on('connect', () => setStatus('Successfully connected to the signaling server!'));
-        socketRef.current.on("all users", users => {
-            users.forEach(userID => { createPeer(userID, socketRef.current.id); });
-        });
-        socketRef.current.on('user joined', userID => {
-            createPeer(userID, socketRef.current.id);
-        });
-        socketRef.current.on("signal received", payload => {
-            addPeer(payload.signal, payload.callerID);
-        });
-        socketRef.current.on("signal returned", payload => {
-            peersRef.current[payload.id]?.signal(payload.signal);
+        }
+
+        socket.on('connect', () => {
+            setStatus('Successfully connected to the signaling server!');
         });
 
-        // Add listener for server-side disconnect event
-        socketRef.current.on('user left', userID => {
-            console.log(`LOG: Server reports that peer ${userID} has left.`);
-            cleanupPeer(userID);
+        socket.on('all users', users => {
+            console.log("LOG: All users event", users);
+            users.forEach(userID => {
+                if (userID !== socket.id && !peersRef.current[userID]) {
+                    const peer = createPeer(userID, socket.id);
+                    peersRef.current[userID] = peer;
+                }
+            });
         });
+
+        socket.on('user joined', userID => {
+            console.log("LOG: User joined event", userID);
+             if (!peersRef.current[userID]) {
+                const peer = createPeer(userID, socket.id);
+                peersRef.current[userID] = peer;
+            }
+        });
+
+        socket.on('signal received', payload => {
+            console.log("LOG: Signal received event", payload.callerID);
+            if (!peersRef.current[payload.callerID]) {
+                const peer = addPeer(payload.signal, payload.callerID);
+                peersRef.current[payload.callerID] = peer;
+            }
+        });
+
+        socket.on('signal returned', payload => {
+            console.log("LOG: Signal returned event", payload.id);
+            const peer = peersRef.current[payload.id];
+            if (peer) {
+                peer.signal(payload.signal);
+            }
+        });
+        
+        socket.on('user left', cleanupPeer);
 
         return () => {
-            if (socketRef.current) socketRef.current.disconnect();
+            socket.disconnect();
             Object.values(peersRef.current).forEach(peer => peer.destroy());
         };
     }, [setupPeerEvents, cleanupPeer]);
     
     const handleFileSelect = (e) => {
         const file = e.target.files[0]; if (!file) return;
-        
         const updatedFiles = { ...myFilesRef.current, [file.name]: file };
+        myFilesRef.current = updatedFiles;
         setMyFiles(updatedFiles);
 
         const fileList = Object.values(updatedFiles).map(f => ({ name: f.name, size: f.size }));
-        
-        console.log("LOG: Announcing updated file list to all connected peers.");
         Object.values(peersRef.current).forEach(peer => {
             if (peer.connected) {
                  peer.send(JSON.stringify({ type: 'file-list', files: fileList }));
