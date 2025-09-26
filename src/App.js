@@ -112,7 +112,8 @@ function App() {
         const addPeer = (callerID, incomingSignal) => {
              if (peersRef.current[callerID]) {
                 console.log(`Answering existing peer ${callerID}`);
-                return peersRef.current[callerID].signal(incomingSignal);
+                peersRef.current[callerID].signal(incomingSignal);
+                return peersRef.current[callerID];
             }
             const peer = new Peer({ initiator: false, trickle: false });
             peer.on('signal', signal => socketRef.current.emit('returning signal', { signal, callerID }));
@@ -121,6 +122,7 @@ function App() {
             return peer;
         }
 
+        // Event for the NEW user: connect to everyone already here.
         socketRef.current.on('all users', users => {
             users.forEach(userID => {
                 if (userID !== socketRef.current.id) {
@@ -130,16 +132,18 @@ function App() {
         });
 
         // ================== THIS IS THE MAIN FIX ==================
-        // When a new user joins, existing users should INITIATE the connection to them.
+        // Event for EXISTING users: a new user has joined.
+        // We simply log this and wait for the new user's signal. We DO NOT initiate a connection here.
         socketRef.current.on('user joined', userID => {
-            console.log(`A new user joined: ${userID}. Initiating connection.`);
-            peersRef.current[userID] = createPeer(userID, socketRef.current.id);
+            console.log(`A new user joined: ${userID}. Waiting for their signal.`);
         });
         
+        // An existing user receives a signal from a new user. Now we create our peer to answer.
         socketRef.current.on('signal received', payload => {
              peersRef.current[payload.callerID] = addPeer(payload.callerID, payload.signal);
         });
 
+        // A new user (initiator) gets the signal back from an existing user.
         socketRef.current.on('signal returned', payload => {
             peersRef.current[payload.id]?.signal(payload.signal);
         });
@@ -160,7 +164,8 @@ function App() {
         setMyFiles(prev => ({ ...prev, [file.name]: file }));
         const fileInfo = { name: file.name, size: file.size };
         Object.values(peersRef.current).forEach(peer => {
-            if (peer.connected) {
+            // Add a check to make sure the peer exists and is connected before sending
+            if (peer && peer.connected) {
                 peer.send(JSON.stringify({ type: 'file-list', files: [fileInfo] }));
             }
         });
