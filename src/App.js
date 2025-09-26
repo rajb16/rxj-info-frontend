@@ -21,6 +21,10 @@ function App() {
 
     const socketRef = useRef();
     const peersRef = useRef({});
+    // ================== THIS IS THE FIX ==================
+    // This line was missing, causing the build error.
+    const fileChunksRef = useRef({});
+    // =====================================================
     const myFilesRef = useRef(myFiles);
     myFilesRef.current = myFiles;
     const currentlyReceivingFile = useRef(null);
