@@ -9,12 +9,11 @@ function App() {
   const [status, setStatus] = useState("Connecting to network...");
   const [myFiles, setMyFiles] = useState({});
   const [peerFiles, setPeerFiles] = useState({});
+  const [peerIDs, setPeerIDs] = useState([]);
 
   const socketRef = useRef();
   const peersRef = useRef({});
   const fileChunksRef = useRef({});
-
-  // Using a ref to hold myFiles will prevent re-renders from breaking dependencies
   const myFilesRef = useRef(myFiles);
   myFilesRef.current = myFiles;
 
@@ -31,7 +30,7 @@ function App() {
             ),
           }));
         } else if (message.type === "file-request") {
-          const file = myFilesRef.current[message.name]; // Use ref here
+          const file = myFilesRef.current[message.name];
           const peer = peersRef.current[peerID];
           if (file && peer) {
             sendFile(file, peer);
@@ -60,19 +59,24 @@ function App() {
         fileChunksRef.current[fileName].chunks.push(data);
       }
     }
-  }, []); // Empty dependency array is key
+  }, []);
 
+  // --- THIS FUNCTION IS UPDATED ---
   const setupPeerEvents = useCallback(
     (peer, peerID) => {
       setStatus(`Connected to a peer! Ready to share.`);
       peer.on("data", (data) => handleData(data, peerID));
-      const fileList = Object.values(myFilesRef.current).map((f) => ({
-        name: f.name,
-        size: f.size,
-      })); // Use ref here
-      if (fileList.length > 0) {
-        peer.send(JSON.stringify({ type: "file-list", files: fileList }));
-      }
+
+      // Add a small delay to ensure the data channel is ready
+      setTimeout(() => {
+        const fileList = Object.values(myFilesRef.current).map((f) => ({
+          name: f.name,
+          size: f.size,
+        }));
+        if (fileList.length > 0 && peer.connected) {
+          peer.send(JSON.stringify({ type: "file-list", files: fileList }));
+        }
+      }, 100); // 100ms delay
     },
     [handleData]
   );
@@ -123,12 +127,14 @@ function App() {
         const peer = createPeer(userID, socketRef.current.id);
         peersRef.current[userID] = peer;
       });
+      setPeerIDs(users);
     });
 
     socketRef.current.on("signal received", (payload) => {
       setStatus("Peer joining. Accepting connection...");
       const peer = addPeer(payload.signal, payload.callerID);
       peersRef.current[payload.callerID] = peer;
+      setPeerIDs((prev) => [...prev, payload.callerID]);
     });
 
     socketRef.current.on("signal returned", (payload) => {
@@ -139,6 +145,7 @@ function App() {
       setStatus("A peer has left the network.");
       if (peersRef.current[userID]) peersRef.current[userID].destroy();
       delete peersRef.current[userID];
+      setPeerIDs((prev) => prev.filter((id) => id !== userID));
       setPeerFiles({});
     });
 
@@ -146,16 +153,14 @@ function App() {
       if (socketRef.current) socketRef.current.disconnect();
       Object.values(peersRef.current).forEach((peer) => peer.destroy());
     };
-  }, [setupPeerEvents]); // Only depends on setupPeerEvents now
+  }, [setupPeerEvents]);
 
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    setMyFiles((prev) => {
-      const newFiles = { ...prev, [file.name]: file };
-      myFilesRef.current = newFiles; // Keep ref in sync
-      return newFiles;
-    });
+    const newFiles = { ...myFilesRef.current, [file.name]: file };
+    myFilesRef.current = newFiles;
+    setMyFiles(newFiles);
     Object.values(peersRef.current).forEach((peer) => {
       if (peer.connected) {
         peer.send(
