@@ -5,6 +5,17 @@ import './App.css';
 
 const API_URL = 'https://rxj-info-api.onrender.com';
 
+// ================== FIX #1: STUN Server Configuration ==================
+// This helps peers connect more reliably across different networks.
+const peerConfig = {
+    config: {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+    },
+};
+
 function App() {
     const [status, setStatus] = useState('Connecting to network...');
     const [myFiles, setMyFiles] = useState({});
@@ -79,6 +90,7 @@ function App() {
     const setupPeerEvents = useCallback((peer, peerID) => {
         setStatus(`Connected to a peer! Ready to share.`);
         peer.on('connect', () => {
+            console.log(`Connection established with ${peerID}`);
             const files = Object.values(myFilesRef.current).map(f => ({ name: f.name, size: f.size }));
             if (files.length > 0) {
                peer.send(JSON.stringify({ type: 'file-list', files }));
@@ -94,66 +106,61 @@ function App() {
         });
     }, [handleData, cleanupPeer]);
 
+    // ================== FIX #2: Simplified and More Robust useEffect Logic ==================
     useEffect(() => {
         socketRef.current = io(API_URL);
+        const socket = socketRef.current;
         setStatus('Successfully connected to the signaling server!');
 
-        const createPeer = (userToSignal, callerID) => {
-            if (peersRef.current[userToSignal]) {
-                console.log(`Connection with ${userToSignal} already exists.`);
-                return peersRef.current[userToSignal];
-            }
-            const peer = new Peer({ initiator: true, trickle: false });
-            peer.on('signal', signal => socketRef.current.emit('sending signal', { userToSignal, callerID, signal }));
-            setupPeerEvents(peer, userToSignal);
-            return peer;
-        }
-
-        const addPeer = (callerID, incomingSignal) => {
-             if (peersRef.current[callerID]) {
-                console.log(`Answering existing peer ${callerID}`);
-                peersRef.current[callerID].signal(incomingSignal);
-                return peersRef.current[callerID];
-            }
-            const peer = new Peer({ initiator: false, trickle: false });
-            peer.on('signal', signal => socketRef.current.emit('returning signal', { signal, callerID }));
-            peer.signal(incomingSignal);
-            setupPeerEvents(peer, callerID);
-            return peer;
-        }
-
         // Event for the NEW user: connect to everyone already here.
-        socketRef.current.on('all users', users => {
+        socket.on('all users', users => {
             users.forEach(userID => {
-                if (userID !== socketRef.current.id) {
-                    peersRef.current[userID] = createPeer(userID, socketRef.current.id);
+                if (userID !== socket.id && !peersRef.current[userID]) {
+                    console.log(`Initiating connection to existing user: ${userID}`);
+                    const peer = new Peer({ initiator: true, trickle: false, ...peerConfig });
+                    peer.on('signal', signal => {
+                        socket.emit('sending signal', { userToSignal: userID, callerID: socket.id, signal });
+                    });
+                    setupPeerEvents(peer, userID);
+                    peersRef.current[userID] = peer;
                 }
             });
         });
 
-        // ================== THIS IS THE MAIN FIX ==================
-        // Event for EXISTING users: a new user has joined.
-        // We simply log this and wait for the new user's signal. We DO NOT initiate a connection here.
-        socketRef.current.on('user joined', userID => {
-            console.log(`A new user joined: ${userID}. Waiting for their signal.`);
-        });
-        
-        // An existing user receives a signal from a new user. Now we create our peer to answer.
-        socketRef.current.on('signal received', payload => {
-             peersRef.current[payload.callerID] = addPeer(payload.callerID, payload.signal);
+        // Event for EXISTING users: a new user has signaled them.
+        socket.on('signal received', payload => {
+            if (peersRef.current[payload.callerID]) {
+                // If a peer object already exists, just signal it.
+                console.log(`Completing connection with ${payload.callerID}`);
+                peersRef.current[payload.callerID].signal(payload.signal);
+            } else {
+                // Otherwise, create a new peer to answer.
+                console.log(`Answering connection from new user: ${payload.callerID}`);
+                const peer = new Peer({ initiator: false, trickle: false, ...peerConfig });
+                peer.on('signal', signal => {
+                    socket.emit('returning signal', { signal, callerID: payload.callerID });
+                });
+                peer.signal(payload.signal);
+                setupPeerEvents(peer, payload.callerID);
+                peersRef.current[payload.callerID] = peer;
+            }
         });
 
-        // A new user (initiator) gets the signal back from an existing user.
-        socketRef.current.on('signal returned', payload => {
-            peersRef.current[payload.id]?.signal(payload.signal);
+        // Event for an INITIATOR who gets a signal back.
+        socket.on('signal returned', payload => {
+            if (peersRef.current[payload.id]) {
+                peersRef.current[payload.id].signal(payload.signal);
+            }
         });
         
-        socketRef.current.on('user left', userID => {
+        socket.on('user left', userID => {
             cleanupPeer(userID);
         });
+        
+        // No 'user joined' handler is needed, as the initiator ('all users') / answer ('signal received') flow covers all cases.
 
         return () => {
-            socketRef.current.disconnect();
+            socket.disconnect();
             Object.values(peersRef.current).forEach(peer => peer.destroy());
         };
     }, [setupPeerEvents, cleanupPeer]); 
@@ -161,12 +168,16 @@ function App() {
     function handleFileSelect(e) {
         const file = e.target.files[0];
         if (!file) return;
-        setMyFiles(prev => ({ ...prev, [file.name]: file }));
-        const fileInfo = { name: file.name, size: file.size };
+        
+        const updatedFiles = { ...myFilesRef.current, [file.name]: file };
+        setMyFiles(updatedFiles);
+
+        // ================== FIX #3: Always send the full file list for consistency ==================
+        const fullFileList = Object.values(updatedFiles).map(f => ({ name: f.name, size: f.size }));
+
         Object.values(peersRef.current).forEach(peer => {
-            // Add a check to make sure the peer exists and is connected before sending
             if (peer && peer.connected) {
-                peer.send(JSON.stringify({ type: 'file-list', files: [fileInfo] }));
+                peer.send(JSON.stringify({ type: 'file-list', files: fullFileList }));
             }
         });
         e.target.value = '';
