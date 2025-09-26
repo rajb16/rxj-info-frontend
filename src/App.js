@@ -21,10 +21,7 @@ function App() {
 
     const socketRef = useRef();
     const peersRef = useRef({});
-    // ================== THIS IS THE FIX ==================
-    // This line was missing, causing the build error.
     const fileChunksRef = useRef({});
-    // =====================================================
     const myFilesRef = useRef(myFiles);
     myFilesRef.current = myFiles;
     const currentlyReceivingFile = useRef(null);
@@ -45,6 +42,29 @@ function App() {
             return newFiles;
         });
     }, []);
+
+    const sendFile = useCallback((file, peer) => {
+        const chunkSize = 64 * 1024;
+        const reader = new FileReader();
+        let offset = 0;
+        const readSlice = o => {
+            const slice = file.slice(o, o + chunkSize);
+            reader.readAsArrayBuffer(slice);
+        };
+        reader.onload = (e) => {
+            if (!e.target.error) {
+                peer.send(e.target.result);
+                offset += e.target.result.byteLength;
+                if (offset < file.size) {
+                    readSlice(offset);
+                } else {
+                    peer.send(JSON.stringify({ type: 'file-done', name: file.name }));
+                }
+            }
+        };
+        readSlice(0);
+    }, []);
+
 
     const handleData = useCallback((data, peer) => {
         if (typeof data !== 'string') {
@@ -78,7 +98,7 @@ function App() {
                 }
             }
         } catch (e) { console.error('Error handling data', e); }
-    }, []);
+    }, [sendFile]);
 
     const setupPeerEvents = useCallback((peer, peerID) => {
         peer.on('connect', () => {
@@ -100,10 +120,8 @@ function App() {
         const socket = socketRef.current;
         setStatus('Successfully connected to the signaling server!');
 
-        // This is now the ONLY event that manages connections.
         socket.on('all users', users => {
             console.log("Received updated user list:", users);
-            // Connect to new users
             users.forEach(userID => {
                 if (userID !== socket.id && !peersRef.current[userID]) {
                     console.log(`Found a new user to connect to: ${userID}`);
@@ -115,8 +133,6 @@ function App() {
                     peersRef.current[userID] = peer;
                 }
             });
-
-            // Clean up disconnected users
             Object.keys(peersRef.current).forEach(peerID => {
                 if (!users.includes(peerID)) {
                     console.log(`User ${peerID} has left. Cleaning up.`);
@@ -127,6 +143,12 @@ function App() {
 
         socket.on('signal received', payload => {
             console.log(`Received signal from ${payload.callerID}. Answering.`);
+            // ================== THIS IS THE FIX ==================
+            // Avoids creating a new peer if one already exists and is trying to connect.
+            if (peersRef.current[payload.callerID]) {
+                return peersRef.current[payload.callerID].signal(payload.signal);
+            }
+            // =======================================================
             const peer = new Peer({ initiator: false, trickle: false, ...peerConfig });
             peer.on('signal', signal => {
                 socket.emit('returning signal', { signal, callerID: payload.callerID });
@@ -171,22 +193,6 @@ function App() {
         } else {
             console.error("Could not find peer for file:", fileName);
         }
-    }
-
-    function sendFile(file, peer) {
-        const chunkSize = 64 * 1024;
-        const reader = new FileReader();
-        let offset = 0;
-        reader.onload = (e) => {
-            if (!e.target.error) {
-                peer.send(e.target.result);
-                offset += e.target.result.byteLength;
-                if (offset < file.size) readSlice(offset);
-                else peer.send(JSON.stringify({ type: 'file-done', name: file.name }));
-            }
-        };
-        const readSlice = o => { const slice = file.slice(o, o + chunkSize); reader.readAsArrayBuffer(slice); };
-        readSlice(0);
     }
 
     return (
